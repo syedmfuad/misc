@@ -1,0 +1,1397 @@
+# app.R
+# Six-tab Shiny app:
+# 1) Central Limit Theorem
+# 2) t vs Normal
+# 3) Sampling dist. of p-hat
+# 4) CI for a population proportion
+# 5) Proportion z-test (statistic / p-value / combined)
+# 6) Descriptive stats for a quantitative variable
+
+library(shiny)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(scales)
+
+# =========================
+# Helpers used earlier tabs
+# =========================
+beta_params_from_idx <- function(idx) {
+  switch(as.character(idx),
+         "1" = c(a=12,b=2),"2" = c(9,3),"3" = c(7,4),"4" = c(6,5),
+         "5" = c(5,5),"6" = c(5,6),"7" = c(4,7),"8" = c(3,9),"9" = c(2,12))
+}
+pop_label_from_idx <- function(idx){
+  c("Extremely skewed left","Very skewed left","Moderately skewed left",
+    "Slightly skewed left","Symmetric","Slightly skewed right",
+    "Moderately skewed right","Very skewed right","Extremely skewed right")[idx]
+}
+gen_population <- function(idx, N=2e5){
+  pb <- beta_params_from_idx(idx); 10 + 10*rbeta(N, pb[1], pb[2])
+}
+sample_means <- function(pop, n, reps=4000){
+  draws <- matrix(sample(pop, n*reps, replace=TRUE), nrow=reps); rowMeans(draws)
+}
+dens_df <- function(x){ d <- density(x); tibble(x=d$x, y=d$y) }
+normal_reference_df <- function(x){
+  m <- mean(x); s <- sd(x); xs <- seq(min(x), max(x), length.out=512)
+  tibble(x=xs, y=dnorm(xs, m, s))
+}
+
+
+# =========================
+# NEW MODULE: Standard normal forward/backward
+# =========================
+normalCalcUI <- function(id) {
+  ns <- NS(id)
+  fluidRow(
+    column(
+      5,
+      wellPanel(
+        checkboxInput(ns("more"), 'Click to show more info!', FALSE),
+        conditionalPanel(sprintf("input['%s']", ns("more")),
+                         p("Forward: choose z-range, get probability. Backward: choose probability, get z-quantiles.")
+        ),
+        h4("1. Forward or Backward Problem?"),
+        radioButtons(ns("dir"), NULL, c("Forward"="fwd","Backward"="bwd")),
+        tags$hr(),
+        conditionalPanel(sprintf("input['%s']=='fwd'", ns("dir")),
+                         h4("2. What type of range of z?"),
+                         radioButtons(ns("rtype"), NULL,
+                                      c("Between two z's"="between","Greater than z"="gt","Less than z"="lt")),
+                         conditionalPanel(sprintf("input['%s']=='between'", ns("rtype")),
+                                          sliderInput(ns("z_between"), "3. Between which two z's?", -4, 4, c(-2, 2), step=.1)
+                         ),
+                         conditionalPanel(sprintf("input['%s']=='gt'", ns("rtype")),
+                                          sliderInput(ns("z_gt"), "Greater than z =", -4, 4, 1.2, step=.1)
+                         ),
+                         conditionalPanel(sprintf("input['%s']=='lt'", ns("rtype")),
+                                          sliderInput(ns("z_lt"), "Less than z =", -4, 4, -1.3, step=.1)
+                         )
+        ),
+        conditionalPanel(sprintf("input['%s']=='bwd'", ns("dir")),
+                         h4("2. Area (probability) and which side?"),
+                         radioButtons(ns("btype"), NULL, c("Central (between ±z*)"="central",
+                                                           "Right tail"="right","Left tail"="left")),
+                         sliderInput(ns("p"), "Probability", 0.001, 0.999, .95, step = .001)
+        ),
+        tags$hr(),
+        h4("Summary of Problem"),
+        textOutput(ns("summary"))
+      )
+    ),
+    column(
+      7,
+      wellPanel(
+        h4("Picture of problem"),
+        plotOutput(ns("plot"), height = 380),
+        tags$hr(),
+        h4("Answer"),
+        textOutput(ns("answer"))
+      )
+    )
+  )
+}
+
+normalCalcServer <- function(id) {
+  moduleServer(id, function(input, output, session){
+    rng_and_prob <- reactive({
+      if (input$dir == "fwd") {
+        if (input$rtype == "between") {
+          a <- min(input$z_between); b <- max(input$z_between)
+          p <- pnorm(b) - pnorm(a)
+          list(type="between", a=a, b=b, p=p)
+        } else if (input$rtype == "gt") {
+          z <- input$z_gt; p <- 1 - pnorm(z)
+          list(type="gt", a=z, p=p)
+        } else {
+          z <- input$z_lt; p <- pnorm(z)
+          list(type="lt", a=z, p=p)
+        }
+      } else {
+        p <- input$p
+        if (input$btype == "central") {
+          z <- qnorm(1 - (1-p)/2); list(type="between", a=-z, b= z, p=p)
+        } else if (input$btype == "right") {
+          z <- qnorm(1 - p); list(type="gt", a=z, p=p)
+        } else {
+          z <- qnorm(p); list(type="lt", a=z, p=p)
+        }
+      }
+    })
+    
+    output$summary <- renderText({
+      r <- rng_and_prob()
+      switch(r$type,
+             between = sprintf("What is the probability that z is between %.2f and %.2f?", r$a, r$b),
+             gt      = sprintf("What is the probability that z is greater than %.2f?", r$a),
+             lt      = sprintf("What is the probability that z is less than %.2f?", r$a)
+      )
+    })
+    
+    output$answer <- renderText({
+      r <- rng_and_prob()
+      sprintf("Probability = %.4f", r$p)
+    })
+    
+    output$plot <- renderPlot({
+      r <- rng_and_prob()
+      xs <- seq(-4,4,length.out=1401); dens <- dnorm(xs)
+      df <- data.frame(xs, dens)
+      shade <- switch(r$type,
+                      "between" = xs >= r$a & xs <= r$b,
+                      "gt"      = xs >= r$a,
+                      "lt"      = xs <= r$a
+      )
+      ggplot() +
+        geom_line(aes(xs, dens), data=df) +
+        geom_area(aes(xs, dens), data=df[shade,], fill="#9db4d6", alpha=.8) +
+        { if (r$type=="between") geom_vline(xintercept=c(r$a, r$b)) else geom_vline(xintercept=r$a) } +
+        labs(x=NULL, y=NULL) +
+        theme_minimal(13) + theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())
+    })
+  })
+}
+
+
+
+
+# ---------- MODULE: CI for mean (t-based) ----------
+ciMeanUI <- function(id){
+  ns <- NS(id)
+  fluidRow(
+    column(4, wellPanel(
+      h4("Sample mean x̄"), sliderInput(ns("xbar"), NULL, 10, 90, 47, 1),
+      h4("Sample standard deviation s"), sliderInput(ns("s"), NULL, 1, 50, 9, 0.1),
+      h4("Sample size n"), sliderInput(ns("n"), NULL, 2, 100, 10, 1),
+      h4("Confidence level"), sliderInput(ns("cl"), NULL, 80, 99, 95, 1, post="%")
+    )),
+    column(4, wellPanel(
+      h4("Parts of the result: t*, se, me"),
+      plotOutput(ns("tplot"), height=220), tags$hr(),
+      htmlOutput(ns("se")), tags$hr(), htmlOutput(ns("me"))
+    )),
+    column(4, wellPanel(
+      h4(textOutput(ns("title"))),
+      plotOutput(ns("cipic"), height=220),
+      sliderInput(ns("xlim"), "Range shown", 0, 100, c(27,68), 1)
+    ))
+  )
+}
+ciMeanServer <- function(id){
+  moduleServer(id, function(input, output, session){
+    parts <- reactive({
+      cl <- input$cl/100; df <- input$n - 1
+      tstar <- qt(1-(1-cl)/2, df=df)
+      se <- input$s / sqrt(input$n)
+      me <- tstar * se
+      list(cl=cl, df=df, tstar=tstar, se=se, me=me,
+           L = input$xbar - me, U = input$xbar + me)
+    })
+    output$title <- renderText({
+      p <- parts(); sprintf("%d%% Confidence interval for μ\n(%.2f, %.2f)", round(p$cl*100), p$L, p$U)
+    })
+    output$se <- renderUI({ p <- parts(); HTML(sprintf("Standard error <em>se</em> = s/√n = %.3f", p$se)) })
+    output$me <- renderUI({ p <- parts(); HTML(sprintf("Margin of error <em>me</em> = t* × se = %.3f", p$me)) })
+    output$tplot <- renderPlot({
+      p <- parts(); xs <- seq(-4,4,length.out=1201); dens <- dt(xs, df=p$df)
+      ggplot() +
+        geom_line(aes(xs, dens)) +
+        geom_area(data=data.frame(xs, dens)[xs>=-p$tstar & xs<= p$tstar,],
+                  aes(xs, dens), fill="#8ecae6", alpha=.8) +
+        geom_vline(xintercept=c(-p$tstar, p$tstar)) +
+        annotate("text", x=0, y=max(dens)*.7, label=paste0(round(p$cl*100),"%")) +
+        labs(x=NULL,y=NULL) + theme_minimal(12) +
+        theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())
+    })
+    output$cipic <- renderPlot({
+      p <- parts()
+      ggplot(tibble(y=0, x=input$xbar, xmin=p$L, xmax=p$U)) +
+        geom_errorbarh(aes(xmin=xmin, xmax=xmax), height=.2, size=1) +
+        geom_point(aes(x, y), size=3, color="blue") +
+        coord_cartesian(xlim=input$xlim, ylim=c(-1,1)) +
+        labs(x=NULL,y=NULL) + theme_minimal(12) +
+        theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())
+    })
+  })
+}
+
+
+
+
+# ---------- MODULE: One-sample t test for μ ----------
+tTestUI <- function(id){
+  ns <- NS(id)
+  fluidRow(
+    column(4, wellPanel(
+      h4("Inputs"),
+      sliderInput(ns("xbar"), "Sample mean x̄", 1, 99, 47, 1),
+      sliderInput(ns("mu0"), HTML("Population mean under H<sub>0</sub> (μ<sub>0</sub>)"), 1, 99, 46, 1),
+      sliderInput(ns("s"), "Sample standard deviation s", 1, 50, 9, .1),
+      sliderInput(ns("n"), "Sample size n", 2, 200, 20, 1)
+    )),
+    column(4, wellPanel(
+      h4("Test statistic"),
+      uiOutput(ns("t_formula")),
+      plotOutput(ns("t_dot"), height=140)
+    )),
+    column(4, wellPanel(
+      h4("P-value"),
+      radioButtons(ns("alt"), "Alternative Hypothesis H\u2090",
+                   c("μ > μ0"="gt","μ < μ0"="lt","μ ≠ μ0"="ne")),
+      plotOutput(ns("pplot"), height=260),
+      h4(textOutput(ns("pval")))
+    ))
+  )
+}
+tTestServer <- function(id){
+  moduleServer(id, function(input, output, session){
+    parts <- reactive({
+      df <- input$n - 1
+      se <- input$s / sqrt(input$n)
+      t  <- (input$xbar - input$mu0) / se
+      list(df=df, se=se, t=t)
+    })
+    output$t_formula <- renderUI({
+      p <- parts()
+      HTML(sprintf("Result: <em>t</em> = (x̄ − μ<sub>0</sub>)/ (s/√n) = %.3f", p$t))
+    })
+    output$t_dot <- renderPlot({
+      p <- parts()
+      ggplot(data.frame(x=p$t)) +
+        geom_segment(x=-5, xend=5, y=0, yend=0, linewidth=.6) +
+        geom_point(aes(x,0), color="#2C7FB8", size=3) +
+        scale_x_continuous(limits=c(-5,5), breaks=seq(-5,5,1)) +
+        theme_minimal(12) + labs(x=NULL,y=NULL) +
+        theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())
+    })
+    output$pplot <- renderPlot({
+      p <- parts(); xs <- seq(-5,5,length.out=1401); dens <- dt(xs, df=p$df)
+      alt <- input$alt
+      shade <- switch(alt,
+                      "gt" = xs >= p$t,
+                      "lt" = xs <= p$t,
+                      "ne" = (xs <= -abs(p$t)) | (xs >= abs(p$t))
+      )
+      ggplot() +
+        geom_line(aes(xs, dens)) +
+        geom_area(data=data.frame(xs, dens, shade)[shade,], aes(xs, dens), fill="grey50", alpha=.6) +
+        geom_vline(xintercept=p$t) +
+        labs(x="Test statistic (t)", y=NULL) +
+        theme_minimal(13) + theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())
+    })
+    output$pval <- renderText({
+      p <- parts(); alt <- input$alt
+      pv <- switch(alt,
+                   "gt" = 1 - pt(p$t, df=p$df),
+                   "lt" = pt(p$t, df=p$df),
+                   "ne" = 2 * (1 - pt(abs(p$t), df=p$df))
+      )
+      sprintf("p-value = %.4f", pv)
+    })
+  })
+}
+
+
+
+# ---------- MODULE: Chi-squared test for two-way table ----------
+chisqUI <- function(id){
+  ns <- NS(id)
+  fluidRow(
+    column(4, wellPanel(
+      h4("How many rows?"), radioButtons(ns("R"), NULL, 2:5, inline=TRUE, selected=3),
+      h4("How many columns?"), radioButtons(ns("C"), NULL, 2:5, inline=TRUE, selected=4),
+      uiOutput(ns("grid_inputs"))
+    )),
+    column(8, wellPanel(
+      tabsetPanel(
+        tabPanel("Conditions",
+                 br(), htmlOutput(ns("conds"))
+        ),
+        tabPanel("Test statistic",
+                 br(), verbatimTextOutput(ns("stat_text"))
+        ),
+        tabPanel("P-value",
+                 br(), plotOutput(ns("chi_plot"), height=260), h4(textOutput(ns("pval")))
+        ),
+        tabPanel("Graphical Interpretation",
+                 br(),
+                 radioButtons(ns("rects"), "Show rectangles representing which counts?",
+                              c("Observed Counts (black)"="obs",
+                                "Expected Counts (red)"="exp",
+                                "Both Observed and Expected Counts"="both")),
+                 plotOutput(ns("mosaic"), height=360)
+        )
+      )
+    ))
+  )
+}
+chisqServer <- function(id){
+  moduleServer(id, function(input, output, session){
+    
+    output$grid_inputs <- renderUI({
+      R <- as.integer(input$R); C <- as.integer(input$C)
+      tagList(
+        h4("Enter Counts Here"),
+        tags$table(
+          do.call(tags$tr, c(list(tags$td(" ")), lapply(1:C, function(j) tags$th(j)) )),
+          lapply(1:R, function(i){
+            do.call(tags$tr, c(list(tags$td(i)),
+                               lapply(1:C, function(j){
+                                 numericInput(session$ns(paste0("cell_", i, "_", j)), NULL, value = sample(10:100,1), min=0)
+                               })))
+          })
+        )
+      )
+    })
+    
+    O_mat <- reactive({
+      R <- as.integer(input$R); C <- as.integer(input$C)
+      M <- matrix(0, R, C)
+      for (i in 1:R) for (j in 1:C)
+        M[i,j] <- as.numeric(input[[paste0("cell_", i, "_", j)]])
+      M
+    })
+    
+    parts <- reactive({
+      O <- O_mat(); rs <- rowSums(O); cs <- colSums(O); n <- sum(O)
+      E <- outer(rs, cs) / n
+      stat <- sum((O - E)^2 / pmax(E, 1e-9))
+      df <- (nrow(O)-1)*(ncol(O)-1)
+      list(O=O, E=E, n=n, rs=rs, cs=cs, stat=stat, df=df)
+    })
+    
+    output$conds <- renderUI({
+      p <- parts()
+      small <- any(p$E < 5)
+      HTML(sprintf("All expected counts ≥ 5? %s",
+                   ifelse(!small, "&#10003;", "&#10007; (at least one < 5)")))
+    })
+    output$stat_text <- renderPrint({
+      p <- parts(); cat("Chi-squared statistic (Σ (O-E)^2/E) =", round(p$stat, 3),
+                        "with df =", p$df, "\n")
+    })
+    output$chi_plot <- renderPlot({
+      p <- parts(); xs <- seq(0, max(1, qchisq(.999, df=p$df)), length.out=1201)
+      dens <- dchisq(xs, df=p$df)
+      ggplot() +
+        geom_line(aes(xs, dens)) +
+        geom_area(data=data.frame(xs, dens)[xs >= p$stat,], aes(xs, dens), fill="grey60", alpha=.7) +
+        geom_vline(xintercept=p$stat) +
+        labs(x="χ²", y=NULL) + theme_minimal(13) + theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())
+    })
+    output$pval <- renderText({
+      p <- parts(); sprintf("p-value = %.4f", 1 - pchisq(p$stat, df=p$df))
+    })
+    
+    output$mosaic <- renderPlot({
+      p <- parts(); O <- p$O; E <- p$E
+      # mosaic rectangles using expected areas; observed can be overplotted
+      rs <- rowSums(E); cs <- colSums(E); n <- sum(E)
+      xbreaks <- c(0, cumsum(cs)/n)
+      ybreaks <- c(0, cumsum(rs)/n)
+      rects <- do.call(rbind, lapply(1:nrow(E), function(i){
+        do.call(rbind, lapply(1:ncol(E), function(j){
+          data.frame(
+            xmin = xbreaks[j], xmax = xbreaks[j+1],
+            ymin = 1 - ybreaks[i+1], ymax = 1 - ybreaks[i],
+            obs  = O[i,j], exp = E[i,j]
+          )
+        }))
+      }))
+      g <- ggplot(rects) +
+        geom_rect(aes(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax),
+                  fill="white", color="black") +
+        geom_text(aes((xmin+xmax)/2, (ymin+ymax)/2, label=round(ifelse(input$rects=="exp", exp, obs))), size=4) +
+        coord_equal() + theme_void()
+      if (input$rects == "both") {
+        g <- g + geom_rect(aes(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax),
+                           color="red", fill=NA, linewidth=.7)
+      }
+      g
+    })
+  })
+}
+
+
+
+# ---------- MODULE: Slope-intercept line ----------
+slopeUI <- function(id){
+  ns <- NS(id)
+  fluidRow(
+    column(4, wellPanel(
+      h4("Slope m"), sliderInput(ns("m"), NULL, -3, 3, 1.3, .1),
+      h4("Y-Intercept b"), sliderInput(ns("b"), NULL, -2, 2, 1.7, .1)
+    )),
+    column(8, wellPanel(
+      h4(uiOutput(ns("eq"))),
+      plotOutput(ns("plot"), height=420),
+      htmlOutput(ns("explain"))
+    ))
+  )
+}
+slopeServer <- function(id){
+  moduleServer(id, function(input, output, session){
+    output$eq <- renderUI({
+      HTML(sprintf("Equation: y = <span style='color:#1f77b4'>%.2f</span> x + <span style='color:#d62728'>%.2f</span>",
+                   input$m, input$b))
+    })
+    output$plot <- renderPlot({
+      m <- input$m; b <- input$b
+      xs <- seq(-3, 3, length.out=200); ys <- m*xs + b
+      g <- ggplot() +
+        geom_abline(slope=m, intercept=b, size=1) +
+        geom_hline(yintercept=0, color="grey50") + geom_vline(xintercept=0, color="grey50") +
+        coord_cartesian(xlim=c(-3,3), ylim=c(-3,3)) +
+        annotate("segment", x=1, xend=1, y=b, yend=b+m, color="blue") +
+        annotate("text", x=1.1, y=b+m/2, label=sprintf("%.1f", m), color="blue", hjust=0) +
+        annotate("point", x=0, y=b, color="red") +
+        annotate("segment", x=0, xend=1, y=b, yend=b, color="red", arrow=grid::arrow(length=unit(6,"pt"))) +
+        annotate("text", x=.1, y=b+.15, label=sprintf("%.1f", b), color="red", hjust=0) +
+        labs(x="x", y="y") + theme_minimal(14)
+      g
+    })
+    output$explain <- renderUI({
+      HTML(paste(
+        "<b>Explanation of Plot</b><br/>",
+        "<span style='color:#1f77b4'>Blue</span>: slope m (rise from x=1 to x=1 → y increases by m).<br/>",
+        "<span style='color:#d62728'>Red</span>: y-intercept b (value of y when x=0)."
+      ))
+    })
+  })
+}
+
+
+
+
+# ---------- MODULE: Least-squares regression "game" ----------
+lsGameUI <- function(id){
+  ns <- NS(id)
+  fluidRow(
+    column(3, wellPanel(
+      h4("Which dataset?"),
+      radioButtons(ns("which"), NULL, c("Houses","Random")),
+      h4("Guess the LS line!"),
+      numericInput(ns("b0"), "Y-intercept", 180, step=1),
+      numericInput(ns("b1"), "Slope", 0.022, step=0.001),
+      checkboxGroupInput(ns("show"), "Show which lines?",
+                         c("Your Guess"="guess","Residuals"="resid","The true LS regression line"="true"),
+                         selected = c("guess","true"))
+    )),
+    column(5, wellPanel(
+      h4("Table"),
+      tableOutput(ns("tbl"))
+    )),
+    column(4, wellPanel(
+      h4("Scatterplot"),
+      plotOutput(ns("scatter"), height=260),
+      h4("Sum of squared residuals"),
+      htmlOutput(ns("ssr_text")),
+      plotOutput(ns("ssr_bar"), height=80)
+    ))
+  )
+}
+
+lsGameServer <- function(id){
+  moduleServer(id, function(input, output, session){
+    
+    houses <- reactive({
+      # (SqFt, Price) — small illustrative set
+      data.frame(
+        x = c(616, 960, 1080, 1480, 1581, 1915, 2104, 2488, 2600, 2676),
+        y = c(157, 168, 130, 190, 200, 260, 223, 302, 280, 212)
+      )
+    })
+    
+    dat <- reactive({
+      if (input$which == "Houses") houses()
+      else data.frame(x = round(runif(10, 600, 2700)), y = round(rnorm(10, 200, 60)))
+    })
+    
+    augmented <- reactive({
+      d <- dat()
+      d$obs_id <- seq_len(nrow(d))             # <-- precompute ID for ggplot color mapping
+      yhat_g <- input$b0 + input$b1 * d$x
+      fit <- lm(y ~ x, d)
+      d$yhat <- yhat_g
+      d$resid <- d$y - d$yhat
+      d$resid_sq <- d$resid^2
+      list(d=d, fit=fit, ssr=sum(d$resid_sq))
+    })
+    
+    output$tbl <- renderTable({
+      augmented()$d |>
+        mutate(across(where(is.numeric), ~round(.x, 1)))
+    }, digits=1, striped=TRUE, bordered=TRUE)
+    
+    output$scatter <- renderPlot({
+      a <- augmented(); d <- a$d; fit <- a$fit
+      g <- ggplot(d, aes(x, y, color = factor(obs_id))) +  # <-- use obs_id here
+        geom_point(size=3) +
+        scale_color_discrete(guide = "none") +
+        labs(x="Square feet", y="Price (in $1000s)") +
+        theme_minimal(13)
+      
+      if ("guess" %in% input$show)
+        g <- g + geom_abline(intercept=input$b0, slope=input$b1, linetype="dashed")
+      
+      if ("true" %in% input$show) {
+        b <- coef(fit); g <- g + geom_abline(intercept=b[1], slope=b[2])
+      }
+      
+      if ("resid" %in% input$show)
+        g <- g + geom_segment(aes(x=x, xend=x, y=yhat, yend=y), linetype="dotted")
+      
+      g
+    })
+    
+    output$ssr_text <- renderUI({
+      a <- augmented(); b <- coef(a$fit)
+      HTML(sprintf("• For guessed line = %s<br/>• For true LS regression line = %s (Minimum)",
+                   format(round(a$ssr,1), big.mark=","), format(round(sum(resid(a$fit)^2),1), big.mark=",")))
+    })
+    
+    output$ssr_bar <- renderPlot({
+      a <- augmented(); d <- a$d
+      d$w <- d$resid_sq / sum(d$resid_sq)
+      d$lab <- seq_len(nrow(d))
+      ggplot(d, aes(lab, w, fill=factor(lab))) +
+        geom_col(width=1) + scale_fill_discrete(guide="none") +
+        scale_y_continuous(labels=scales::percent) +
+        labs(x=NULL,y=NULL) + theme_minimal(12) +
+        theme(axis.text.x=element_blank(), axis.ticks.x=element_blank())
+    })
+  })
+}
+
+
+
+
+
+# =========================
+# UI
+# =========================
+ui <- fluidPage(
+  titlePanel("Sampling & Inference Visualizer"),
+  tabsetPanel(id="main_tabs",
+              
+              # ---------------- TAB 1: CLT ----------------
+              tabPanel("Central Limit Theorem",
+                       br(),
+                       fluidRow(
+                         column(6, wellPanel(
+                           h4("Shape of Population"),
+                           sliderInput("clt_shape_idx", NULL, 1, 9, 2, 1, ticks=FALSE,
+                                       animate=animationOptions(1200, "Play", "Pause")),
+                           htmlOutput("clt_shape_label")
+                         )),
+                         column(6, wellPanel(
+                           h4(HTML('Sample size (<em>n</em>) — use "Play" for animation!')),
+                           sliderInput("clt_n", NULL, 1, 40, 16, 1, ticks=TRUE,
+                                       animate=animationOptions(700, "Play", "Pause"))
+                         ))
+                       ),
+                       tabsetPanel(
+                         tabPanel("Population", br(), plotOutput("clt_pop_plot", height=360)),
+                         tabPanel(HTML("Population vs. Sampling Dist. of &nbsp;&bar;x;"),
+                                  br(), plotOutput("clt_pop_vs_xbar", height=400)),
+                         tabPanel(HTML("Sampling Dist. of &nbsp;&bar;x; vs. Normal Dist."),
+                                  br(), plotOutput("clt_xbar_vs_norm_both", height=420),
+                                  tags$small(em("Left fixed scale; right auto-rescaled.")))
+                       )
+              ),
+              
+              # ---------------- TAB 2: t vs Normal ----------------
+              tabPanel("t vs Normal",
+                       br(),
+                       fluidRow(
+                         column(4,
+                                wellPanel(
+                                  checkboxInput("tz_show_info", "Show more info!", FALSE),
+                                  conditionalPanel("input.tz_show_info",
+                                                   p(HTML("Plots Student’s <em>t</em> and standard normal (<em>z</em>)")),
+                                  ),
+                                  h4("Degrees of Freedom (df)"),
+                                  radioButtons("tz_df_mode","Input type for df",
+                                               c("Slider"="slider","Text Input"="text"), selected="text"),
+                                  conditionalPanel("input.tz_df_mode=='slider'",
+                                                   sliderInput("tz_df_slider","df",1,200,18,1)),
+                                  conditionalPanel("input.tz_df_mode=='text'",
+                                                   numericInput("tz_df_text","df",18.4,min=0.0001,step=0.1),
+                                                   tags$small("Required: df > 0"))
+                                ),
+                                wellPanel(
+                                  checkboxInput("tz_show_cv",
+                                                HTML("Show <em>t</em><sup>*</sup> and <em>z</em><sup>*</sup>"), TRUE),
+                                  h4("Confidence level"), sliderInput("tz_cl",NULL,80,99,97,1,post="%")
+                                )
+                         ),
+                         column(8, wellPanel(h4("Comparing t and Standard Normal Distributions"),
+                                             plotOutput("tz_plot", height=520)))
+                       )
+              ),
+              
+              # ---------------- TAB 3: Sampling dist. of p-hat ----------------
+              tabPanel(HTML("Sampling dist. of p&#770;"),
+                       br(),
+                       fluidRow(
+                         column(3,
+                                wellPanel(
+                                  h4("Population proportion (p)"),
+                                  sliderInput("ph_p", NULL, 0.01, 0.99, 0.50, 0.01, ticks=TRUE)
+                                ),
+                                wellPanel(
+                                  h4("Sample size (n)"),
+                                  sliderInput("ph_n", NULL, 2, 1000, 129, 1)
+                                ),
+                                wellPanel(
+                                  h4("Normal conditions"),
+                                  htmlOutput("ph_cond_text"), tags$hr(), htmlOutput("ph_cond_check")
+                                )
+                         ),
+                         column(9,
+                                tabsetPanel(
+                                  tabPanel(HTML("Sampling Distribution of p&#770;"),
+                                           br(), uiOutput("ph_stats"),
+                                           plotOutput("ph_plot", height=360),
+                                           checkboxInput("ph_do_prob",
+                                                         HTML("Calculate probability that p&#770; falls in a range (exact vs normal)"), TRUE),
+                                           conditionalPanel("input.ph_do_prob",
+                                                            sliderInput("ph_LR", "Range", 0, 1, c(0.446,0.537), 0.001),
+                                                            tableOutput("ph_probs")
+                                           ),
+                                           sliderInput("ph_xlim", "X-axis Range Shown", 0, 1, c(0.37,0.62), 0.001)
+                                  ),
+                                  tabPanel("Comparison with Normal Approximation",
+                                           br(), plotOutput("ph_plot_with_normal", height=380))
+                                )
+                         )
+                       )
+              ),
+              
+              # ---------------- TAB 4: CI for population proportion ----------------
+              tabPanel("CI for p",
+                       br(),
+                       fluidRow(
+                         column(4,
+                                wellPanel(
+                                  h4("Sample proportion (p̂)"),
+                                  sliderInput("ci_phat", NULL, 0.01, 0.99, 0.50, 0.01),
+                                  h4("Sample size (n)"),
+                                  sliderInput("ci_n", NULL, 2, 1000, 100, 1),
+                                  h4("Confidence level (%)"),
+                                  sliderInput("ci_cl", NULL, 80, 99.8, 95, 0.1)
+                                ),
+                                wellPanel(
+                                  h4("Normal conditions"),
+                                  htmlOutput("ci_cond")
+                                )
+                         ),
+                         column(4,
+                                wellPanel(
+                                  h4("Parts of the result: z*, se, me"),
+                                  plotOutput("ci_z_plot", height=220),
+                                  tags$hr(),
+                                  htmlOutput("ci_se"),
+                                  tags$hr(),
+                                  htmlOutput("ci_me")
+                                )
+                         ),
+                         column(4,
+                                wellPanel(
+                                  h4(textOutput("ci_title")),
+                                  plotOutput("ci_plot", height=220),
+                                  sliderInput("ci_xlim","Range Shown", 0, 1, c(0,1), 0.01)
+                                )
+                         )
+                       )
+              ),
+              
+              # ---------------- TAB 5: Proportion test (z-test) ----------------
+              tabPanel("Proportion test",
+                       br(),
+                       fluidRow(
+                         column(4,
+                                wellPanel(
+                                  h4("Test statistic inputs"),
+                                  sliderInput("ht_phat", HTML("Sample proportion p̂"), 0.01, 0.99, 0.51, 0.01),
+                                  sliderInput("ht_p0", HTML("Null value p<sub>0</sub>"), 0.01, 0.99, 0.50, 0.01),
+                                  sliderInput("ht_n",  HTML("Sample size n"), 2, 1000, 100, 1)
+                                )
+                         ),
+                         column(4,
+                                wellPanel(
+                                  h4("Normal conditions"),
+                                  htmlOutput("ht_cond"),
+                                  tags$hr(),
+                                  h4("Test statistic"),
+                                  plotOutput("ht_z_dot", height=140),
+                                  tags$small(textOutput("ht_z_text"))
+                                )
+                         ),
+                         column(4,
+                                wellPanel(
+                                  h4("P-value"),
+                                  radioButtons("ht_alt","Alternative Hypothesis (H\u2090)",
+                                               c("p > p0"="gt","p < p0"="lt","p \u2260 p0"="ne"), inline=FALSE),
+                                  plotOutput("ht_p_plot", height=250),
+                                  tags$h4(textOutput("ht_pval_text"))
+                                )
+                         )
+                       )
+              ),
+              
+              # ---------------- TAB 6: Descriptive statistics ----------------
+              tabPanel("Descriptive stats",
+                       br(),
+                       fluidRow(
+                         column(3,
+                                wellPanel(
+                                  h4("Enter Data"),
+                                  tags$small("Separate with commas/space/newlines"),
+                                  textAreaInput("ds_text", NULL,
+                                                value=paste(c(6,8,5,3,6,10,14,9,6,2,1,1,6,7,7,2,3,13,7,9,0,2,3,5,12,11,7,8,10,12),
+                                                            collapse=", "), height="250px")
+                                )
+                         ),
+                         column(5,
+                                wellPanel(
+                                  h4("Histogram"),
+                                  radioButtons("ds_y", "Y-axis represents:", c("counts","proportions"), inline=TRUE),
+                                  radioButtons("ds_bins_mode","How number of bins is determined:",
+                                               c("Automatically"="auto","You choose"="manual"), inline=TRUE),
+                                  conditionalPanel("input.ds_bins_mode=='manual'",
+                                                   sliderInput("ds_bins","Bins",1,30,10,1)
+                                  ),
+                                  plotOutput("ds_hist", height=260)
+                                )
+                         ),
+                         column(4,
+                                wellPanel(
+                                  h4("Boxplot"),
+                                  radioButtons("ds_box_type","Boxplot type:", c("simple","modified"), inline=TRUE, selected="modified"),
+                                  checkboxInput("ds_show_fences","Show fences?", FALSE),
+                                  plotOutput("ds_box", height=220)
+                                )
+                         )
+                       ),
+                       fluidRow(
+                         column(6, wellPanel(h4("Numerical summaries"), tableOutput("ds_summary1"))),
+                         column(6, wellPanel(h4("Sorted from smallest to largest"), verbatimTextOutput("ds_sorted")))
+                       )
+              ), 
+              
+              
+              
+              # ---------------- TAB 7: Two-sample t (means) ----------------
+              tabPanel("Two-sample (means)",
+                       br(),
+                       tabsetPanel(
+                         id = "twosamp_tabs",
+                         tabPanel("Two-sample t test",
+                                  br(),
+                                  fluidRow(
+                                    column(3, wellPanel(
+                                      h4("Summary statistics"),
+                                      tags$small("We’ll assume s1 = s2 and n1 = n2 for simplicity."),
+                                      sliderInput("ts_x1", "Sample 1 mean (x̄1)", min=0, max=10, value=5, step=.1),
+                                      sliderInput("ts_x2", "Sample 2 mean (x̄2)", min=0, max=10, value=3, step=.1),
+                                      sliderInput("ts_s",  "Sample std devs (s1 = s2)", min=1, max=10, value=3, step=.1),
+                                      radioButtons("ts_nmode", "Input type for sample sizes",
+                                                   c("Slider"="slider","Text Input"="text"), selected="slider"),
+                                      conditionalPanel("input.ts_nmode == 'slider'",
+                                                       sliderInput("ts_n", "Sample sizes (n1 = n2)", min=2, max=200, value=30, step=1)
+                                      ),
+                                      conditionalPanel("input.ts_nmode == 'text'",
+                                                       numericInput("ts_n_text", "Sample sizes (n1 = n2)", value=30, min=2, step=1)
+                                      )
+                                    )),
+                                    column(4, wellPanel(
+                                      h4("Test statistic"),
+                                      tags$img(src = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAgCAYAAABpZGU/AAA...", height="36"),  # harmless tiny placeholder; optional
+                                      tags$hr(),
+                                      h5("Two parts of formula:"),
+                                      textInput("ts_num", "Numerator: difference in means", value = "x̄1 − x̄2"),
+                                      textInput("ts_den", "Denominator: standard error",  value = "√( s^2/n1 + s^2/n2 )"),
+                                      tags$hr(),
+                                      uiOutput("ts_t_value_plot")
+                                    )),
+                                    column(5, wellPanel(
+                                      h4("P-value"),
+                                      radioButtons("ts_alt", "Alternative hypothesis (H\u2090)",
+                                                   c("μ1 > μ2"="gt", "μ1 < μ2"="lt", "μ1 ≠ μ2"="ne")),
+                                      textInput("ts_df_disp", "DF (easy approx*)", value = "", placeholder = "auto", width="150px"),
+                                      tags$small("*DF ≈ min(n1, n2) − 1"),
+                                      plotOutput("ts_p_plot", height = 240),
+                                      tags$h5(textOutput("ts_pval_text"))
+                                    ))
+                                  )
+                         ),
+                         tabPanel("CI for difference in means",
+                                  br(),
+                                  fluidRow(
+                                    column(4, wellPanel(
+                                      h4("Confidence level"),
+                                      sliderInput("ts_ci_cl", NULL, min=80, max=99, value=95, step=1, post="%")
+                                    )),
+                                    column(8, wellPanel(
+                                      h4(textOutput("ts_ci_title")),
+                                      plotOutput("ts_ci_plot", height = 220)
+                                    ))
+                                  )
+                         )
+                       )
+              ),
+              
+              # ---------------- TAB 8: Type I/II error & Power ----------------
+              tabPanel("Type I/II Error & Power",
+                       br(),
+                       fluidRow(
+                         column(3, wellPanel(
+                           h4("The truth"),
+                           radioButtons("pw_truth", NULL, c("H0: μ1 = μ2"="H0", "Ha: μ1 ≠ μ2"="Ha")),
+                           sliderInput("pw_alpha", "Significance level (α)", min=.01, max=.20, value=.05, step=.01)
+                         )),
+                         column(3, wellPanel(
+                           h4("Population means"),
+                           sliderInput("pw_mu1", HTML("&mu;1"), min=0, max=10, value=5, step=.1),
+                           sliderInput("pw_mu2", HTML("&mu;2"), min=0, max=10, value=3, step=.1),
+                           tags$hr(),
+                           tags$small(HTML("<b>Details</b>: normal pops, σ1=σ2=3, n1=n2=30, two-sided test"))
+                         )),
+                         column(3, wellPanel(
+                           h4("Draw samples"),
+                           actionButton("pw_draw1", "Draw New Sample", width="100%"),
+                           br(), br(),
+                           actionButton("pw_draw50", "Draw 50 New Samples", width="100%"),
+                           tags$hr(),
+                           h5("Current decision:"),
+                           textOutput("pw_curr_dec"),
+                           h5("Correct decision or Error:"),
+                           textOutput("pw_curr_right")
+                         )),
+                         column(3, wellPanel(
+                           h4("Tally of results"),
+                           uiOutput("pw_tally")
+                         ))
+                       ),
+                       fluidRow(
+                         column(4, wellPanel(h4("Plot of last sample"), plotOutput("pw_lastplot", height=260))),
+                         column(4, wellPanel(h4("Last sample results"), uiOutput("pw_laststats"))),
+                         column(4, wellPanel(h4("Notes"),
+                                             tags$small("*Two-tailed t-test with Welch df (like `t.test`).")
+                         ))
+                       )
+              ),
+              
+              
+              
+              # ---------------- TAB 7: NEW "Forward" & "Backward" (z) ----------------
+              tabPanel('"Forward" & "Backward" (z)', normalCalcUI("normfb")), 
+              
+              tabPanel("CI for μ (t)",           ciMeanUI("ci_mu")), 
+              
+              tabPanel("t test for μ",           tTestUI("tt_mu")), 
+              
+              tabPanel("Chi-squared test",       chisqUI("chi2")), 
+              
+              tabPanel("Slope–intercept",        slopeUI("slope1")), 
+              
+              tabPanel("Least squares game",     lsGameUI("lsgame")) 
+              
+  )
+)
+
+
+# Define null-coalescing helper (used in power simulator)
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+
+
+# =========================
+# Server
+# =========================
+server <- function(input, output, session){
+  
+  # ----- TAB 1 (CLT) -----
+  output$clt_shape_label <- renderUI({ strong(pop_label_from_idx(input$clt_shape_idx)) })
+  clt_population <- reactive({ gen_population(input$clt_shape_idx) })
+  clt_pop_dens <- reactive({ dens_df(clt_population()) })
+  clt_xbar_samples <- reactive({ sample_means(clt_population(), n=input$clt_n, reps=4000) })
+  clt_xbar_dens <- reactive({ dens_df(clt_xbar_samples()) })
+  clt_xbar_norm_ref <- reactive({ normal_reference_df(clt_xbar_samples()) })
+  
+  output$clt_pop_plot <- renderPlot({
+    ggplot(clt_pop_dens(), aes(x,y)) + geom_area(alpha=.25, fill="grey50") + geom_line(linewidth=1) +
+      coord_cartesian(xlim=c(8,22)) + labs(x=NULL,y=NULL,
+                                           title=paste0("Population distribution: ", pop_label_from_idx(input$clt_shape_idx))) +
+      theme_minimal(base_size=13) + theme(plot.title=element_text(face="bold"))
+  })
+  output$clt_pop_vs_xbar <- renderPlot({
+    pd <- clt_pop_dens() %>% mutate(type="Population")
+    xd <- clt_xbar_dens() %>% mutate(type="Sampling dist. of x̄")
+    ggplot(bind_rows(pd,xd), aes(x,y,color=type)) + geom_line(linewidth=1) +
+      scale_color_manual(values=c("Population"="#888888","Sampling dist. of x̄"="#2C7FB8")) +
+      coord_cartesian(xlim=c(8,22)) + labs(x=NULL,y=NULL, color=NULL) +
+      theme_minimal(base_size=13) + theme(legend.position="top", plot.title=element_text(face="bold"))
+  })
+  output$clt_xbar_vs_norm_both <- renderPlot({
+    p_left <- ggplot() +
+      geom_line(data=clt_xbar_dens(), aes(x,y,color="Samp. dist. of x̄"), linewidth=1) +
+      geom_line(data=clt_xbar_norm_ref(), aes(x,y,color="Normal dist."), linewidth=1, linetype=2) +
+      scale_color_manual(values=c("Samp. dist. of x̄"="#2C7FB8","Normal dist."="#E34A33")) +
+      coord_cartesian(xlim=c(8,22)) + labs(title="Constant scale", x=NULL, y=NULL, color=NULL) +
+      theme_minimal(13) + theme(legend.position="top", plot.title=element_text(face="bold"))
+    p_right <- ggplot() +
+      geom_line(data=clt_xbar_dens(), aes(x,y,color="Samp. dist. of x̄"), linewidth=1) +
+      geom_line(data=clt_xbar_norm_ref(), aes(x,y,color="Normal dist."), linewidth=1, linetype=2) +
+      scale_color_manual(values=c("Samp. dist. of x̄"="#2C7FB8","Normal dist."="#E34A33")) +
+      labs(title="Scale shrinks as n increases", x=NULL, y=NULL, color=NULL) +
+      theme_minimal(13) + theme(legend.position="none", plot.title=element_text(face="bold"))
+    p_left + p_right
+  })
+  
+  # ----- TAB 2 (t vs Normal) -----
+  tz_df <- reactive({ if (input$tz_df_mode=="slider") as.numeric(input$tz_df_slider) else as.numeric(input$tz_df_text) })
+  tz_cv <- reactive({ cl <- input$tz_cl/100; a2 <- (1-cl)/2; list(cl=cl, z_star=qnorm(1-a2), t_star=qt(1-a2, df=tz_df())) })
+  tz_dens <- reactive({ x <- seq(-4,4,length.out=1201); tibble(x=x, normal=dnorm(x), tdist=dt(x, df=tz_df())) })
+  output$tz_plot <- renderPlot({
+    d <- tz_dens(); cv <- tz_cv(); t_label <- sprintf("t Dist with df = %s", format(tz_df(), trim=TRUE))
+    zL <- -cv$z_star; zR <- cv$z_star; tL <- -cv$t_star; tR <- cv$t_star
+    shade_t <- d %>% filter(x>=tL, x<=tR); shade_z <- d %>% filter(x>=zL, x<=zR)
+    p <- ggplot() +
+      geom_line(data=d, aes(x,normal,color="Standard Normal Dist"), linewidth=1.05) +
+      geom_line(data=d, aes(x,tdist, color=t_label), linewidth=1.05) +
+      geom_area(data=shade_z, aes(x, y=normal), alpha=.08, fill="black") +
+      geom_area(data=shade_t, aes(x, y=tdist),  alpha=.15, fill="red") +
+      { if (isTRUE(input$tz_show_cv))
+        list(geom_vline(xintercept=c(-cv$z_star,cv$z_star), color="black", linewidth=.7),
+             geom_vline(xintercept=c(-cv$t_star,cv$t_star), color="red3", linewidth=.7)) } +
+      annotate("label", x=0, y=max(d$tdist,d$normal)*.55, label=percent(cv$cl), label.size=0, alpha=.15, size=5) +
+      scale_color_manual(NULL, values=setNames(c("black","red3"), c("Standard Normal Dist", t_label))) +
+      coord_cartesian(xlim=c(-4,4), ylim=c(0, max(d$normal,d$tdist)*1.05)) +
+      labs(x=NULL,y=NULL) + theme_minimal(14) + theme(legend.position="top", panel.grid.minor=element_blank())
+    if (isTRUE(input$tz_show_cv)) {
+      p <- p +
+        annotate("text", x=cv$z_star, y=-.008, label=paste0("z* = ", round(cv$z_star,2)), vjust=1, color="black") +
+        annotate("text", x=cv$t_star, y=-.028, label=paste0("t* = ", round(cv$t_star,3)), vjust=1, color="red3")
+    }
+    p
+  })
+  
+  # ----- TAB 3 (Sampling dist. of p-hat) -----
+  ph_params <- reactive({
+    p <- input$ph_p; n <- as.integer(input$ph_n); sd <- sqrt(p*(1-p)/n)
+    list(p=p,n=n,sd=sd,np=n*p,nq=n*(1-p), ok=(n*p>=10)&&(n*(1-p)>=10))
+  })
+  output$ph_stats <- renderUI({
+    prm <- ph_params()
+    HTML(sprintf("<ul><li>Mean = <em>p</em> = %.3f</li><li>Standard Deviation = &radic;(p(1-p)/n) = %.3f</li></ul>",
+                 prm$p, prm$sd))
+  })
+  output$ph_cond_text <- renderUI({ HTML("Both:<br/>• “Successes” <em>np</em> ≥ 10<br/>• “Failures” <em>n</em>(1−<em>p</em>) ≥ 10") })
+  output$ph_cond_check <- renderUI({
+    prm <- ph_params()
+    HTML(sprintf("Check:<br/><em>np</em> = %.1f %s<br/><em>n</em>(1−<em>p</em>) = %.1f %s<br/>Both? %s",
+                 prm$np, ifelse(prm$np>=10,"&#10003;","&#10007;"),
+                 prm$nq, ifelse(prm$nq>=10,"&#10003;","&#10007;"),
+                 ifelse(prm$ok,"&#10003;","&#10007;")))
+  })
+  ph_pmf <- reactive({
+    prm <- ph_params(); k <- 0:prm$n
+    tibble(k=k, ph=k/prm$n, prob=dbinom(k, size=prm$n, prob=prm$p))
+  })
+  ph_window <- reactive({ rng <- input$ph_xlim; if (is.null(rng)) c(0,1) else rng })
+  output$ph_plot <- renderPlot({
+    prm <- ph_params(); pmf <- ph_pmf() %>% filter(ph>=ph_window()[1], ph<=ph_window()[2])
+    if (isTRUE(input$ph_do_prob)) {
+      L <- input$ph_LR[1]; R <- input$ph_LR[2]; pmf <- pmf %>% mutate(inrange = ph>=L & ph<=R)
+    } else pmf <- pmf %>% mutate(inrange=FALSE)
+    ggplot(pmf, aes(ph, prob*100)) +
+      geom_col(aes(fill=inrange), width=1/prm$n*0.95, color=NA) +
+      scale_fill_manual(values=c("TRUE"="#4DAF4A","FALSE"="#377EB8"), guide="none") +
+      labs(x="Sample Proportion (p̂)", y="Percent of samples") +
+      coord_cartesian(xlim=ph_window(), ylim=c(0,max(pmf$prob)*100*1.15)) + theme_minimal(13)
+  })
+  output$ph_plot_with_normal <- renderPlot({
+    prm <- ph_params(); pmf <- ph_pmf() %>% filter(ph>=ph_window()[1], ph<=ph_window()[2])
+    xs <- seq(max(0, ph_window()[1]-0.02), min(1, ph_window()[2]+0.02), length.out=1201)
+    nd <- dnorm(xs, prm$p, prm$sd)*100
+    ggplot() +
+      geom_col(data=pmf, aes(ph, prob*100), width=1/prm$n*0.95, fill="#377EB8", alpha=.7) +
+      geom_line(aes(xs, nd), color="#4DAF4A", linewidth=1.2) +
+      labs(x="Sample Proportion (p̂)", y="Percent of samples",
+           title="Sampling distribution of p̂ (bars) with normal approximation (curve)") +
+      coord_cartesian(xlim=ph_window()) + theme_minimal(13)
+  })
+  output$ph_probs <- renderTable({
+    if (!isTRUE(input$ph_do_prob)) return(NULL)
+    prm <- ph_params(); L <- input$ph_LR[1]; R <- input$ph_LR[2]
+    kL <- ceiling(L*prm$n); kR <- floor(R*prm$n)
+    p_exact <- if (kL<=kR) pbinom(kR,prm$n,prm$p) - pbinom(kL-1,prm$n,prm$p) else 0
+    p_norm <- pnorm(R, prm$p, prm$sd) - pnorm(L, prm$p, prm$sd)
+    tibble(`Probability that p̂ is in the range`=c(round(p_exact,4), round(p_norm,4)),
+           `According to which distribution?`=c("Sampling distribution of p̂ (binomial exact)","Normal approximation"))
+  }, bordered=TRUE, striped=TRUE, spacing="m", align="l")
+  
+  # ----- TAB 4 (CI for p) -----
+  ci_ok <- reactive({
+    ph <- input$ci_phat; n <- as.integer(input$ci_n)
+    list(ok = (n*ph>=10 && n*(1-ph)>=10), np=n*ph, nq=n*(1-ph))
+  })
+  output$ci_cond <- renderUI({
+    c <- ci_ok()
+    HTML(sprintf(
+      '"Successes" <em>n</em>p̂ = %.0f %s<br/>"Failures" <em>n</em>(1−p̂) = %.0f %s<br/>Both? %s',
+      c$np, ifelse(c$np>=10,"&#10003;","&#10007;"),
+      c$nq, ifelse(c$nq>=10,"&#10003;","&#10007;"),
+      ifelse(c$ok,"&#10003;","&#10007;")
+    ))
+  })
+  ci_parts <- reactive({
+    ph <- input$ci_phat; n <- as.integer(input$ci_n); cl <- input$ci_cl/100
+    if (!ci_ok()$ok) return(NULL)
+    se <- sqrt(ph*(1-ph)/n); zstar <- qnorm(1-(1-cl)/2); me <- zstar*se
+    list(ph=ph, n=n, cl=cl, se=se, zstar=zstar, me=me,
+         L=max(0, ph-me), U=min(1, ph+me))
+  })
+  output$ci_title <- renderText({
+    parts <- ci_parts(); if (is.null(parts)) return("Confidence interval (conditions not met)")
+    sprintf("Confidence interval = (%.3f, %.3f)", parts$L, parts$U)
+  })
+  output$ci_se <- renderUI({
+    parts <- ci_parts(); if (is.null(parts)) return(HTML("<b>Standard Error</b>: NA"))
+    HTML(sprintf("<b>Standard Error</b> = &radic;(p̂(1−p̂)/n) = %.3f", parts$se))
+  })
+  output$ci_me <- renderUI({
+    parts <- ci_parts(); if (is.null(parts)) return(HTML("<b>Margin of Error</b>: NA"))
+    HTML(sprintf("<b>Margin of Error</b> = z* × se = %.3f", parts$me))
+  })
+  output$ci_z_plot <- renderPlot({
+    cl <- input$ci_cl / 100
+    z  <- qnorm(1 - (1 - cl) / 2)   # z* for the chosen CL
+    
+    xs   <- seq(-4, 4, length.out = 1201)
+    dens <- dnorm(xs)
+    shade_idx <- xs >= -z & xs <= z
+    
+    ggplot() +
+      geom_line(aes(xs, dens)) +
+      geom_area(data = data.frame(xs, dens)[shade_idx, ],
+                aes(xs, dens), fill = "#8ecae6", alpha = 0.8) +
+      annotate("text", x = 0, y = max(dens) * 0.7,
+               label = paste0(round(cl * 100), "%")) +
+      geom_vline(xintercept = c(-z, z)) +
+      labs(x = NULL, y = NULL) +
+      theme_minimal(12) +
+      theme(axis.text.y = element_blank(),
+            axis.ticks.y = element_blank())
+  })
+  output$ci_plot <- renderPlot({
+    parts <- ci_parts(); if (is.null(parts)) return(NULL)
+    df <- tibble(y=0, x=parts$ph, xmin=parts$L, xmax=parts$U)
+    ggplot(df, aes(x=x, y=y)) +
+      geom_errorbarh(aes(xmin=xmin, xmax=xmax), height=.2, size=1) +
+      geom_point(size=3, color="blue") +
+      coord_cartesian(xlim=input$ci_xlim, ylim=c(-1,1)) +
+      labs(x=NULL, y=NULL) + theme_minimal(12) + theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())
+  })
+  
+  # ----- TAB 5 (Proportion test) -----
+  ht_parts <- reactive({
+    ph <- input$ht_phat; p0 <- input$ht_p0; n <- as.integer(input$ht_n)
+    se0 <- sqrt(p0*(1-p0)/n); z <- (ph - p0)/se0
+    list(ph=ph, p0=p0, n=n, se0=se0, z=z, np0=n*p0, nq0=n*(1-p0),
+         ok=(n*p0>=10 && n*(1-p0)>=10))
+  })
+  output$ht_cond <- renderUI({
+    h <- ht_parts()
+    HTML(sprintf("n p<sub>0</sub> = %.0f %s<br/>n(1 − p<sub>0</sub>) = %.0f %s<br/>Both? %s",
+                 h$np0, ifelse(h$np0>=10,"&#10003;","&#10007;"),
+                 h$nq0, ifelse(h$nq0>=10,"&#10003;","&#10007;"),
+                 ifelse(h$ok,"&#10003;","&#10007;")))
+  })
+  output$ht_z_dot <- renderPlot({
+    h <- ht_parts()
+    df <- data.frame(x=h$z)
+    ggplot(df, aes(x, 0)) +
+      geom_segment(x=-5, xend=5, y=0, yend=0, linewidth=.6) +
+      geom_point(color="#2C7FB8", size=3) +
+      scale_x_continuous(limits=c(-5,5), breaks=seq(-5,5,1)) +
+      theme_minimal(12) + labs(x=NULL,y=NULL) +
+      theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())
+  })
+  output$ht_z_text <- renderText({
+    h <- ht_parts(); sprintf("z = %.3f", h$z)
+  })
+  output$ht_p_plot <- renderPlot({
+    h <- ht_parts(); xs <- seq(-4,4,length.out=1201); dens <- dnorm(xs)
+    alt <- input$ht_alt
+    shade <- switch(alt,
+                    "gt" = xs >= h$z,
+                    "lt" = xs <= h$z,
+                    "ne" = (xs <= -abs(h$z)) | (xs >= abs(h$z))
+    )
+    ggplot() +
+      geom_line(aes(xs, dens)) +
+      geom_area(data=data.frame(xs, dens, shade)[shade,], aes(xs, dens), fill="grey50", alpha=.6) +
+      geom_vline(xintercept=h$z) +
+      labs(x="Test statistic (z)", y=NULL) + theme_minimal(13) +
+      theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())
+  })
+  output$ht_pval_text <- renderText({
+    h <- ht_parts(); alt <- input$ht_alt
+    p <- switch(alt,
+                "gt" = 1 - pnorm(h$z),
+                "lt" = pnorm(h$z),
+                "ne" = 2 * (1 - pnorm(abs(h$z)))
+    )
+    sprintf("p-value = %.3f", p)
+  })
+  
+  # ----- TAB 6 (Descriptive stats) -----
+  ds_vals <- reactive({
+    txt <- gsub("[,\n\r]", " ", input$ds_text)
+    nums <- as.numeric(strsplit(txt, "\\s+")[[1]])
+    nums <- nums[is.finite(nums)]
+    nums
+  })
+  output$ds_hist <- renderPlot({
+    x <- ds_vals()
+    if (length(x)==0) return(NULL)
+    p <- ggplot(data.frame(x=x), aes(x)) +
+      { if (input$ds_bins_mode=="manual")
+        geom_histogram(bins=input$ds_bins)
+        else geom_histogram()
+      } +
+      { if (input$ds_y=="proportions")
+        scale_y_continuous(labels=percent_format(),
+                           breaks = waiver(),
+                           trans = "identity",
+                           expand = expansion(mult=c(0, .05))) +
+          aes(y=after_stat(count/sum(count)))
+        else NULL
+      } +
+      labs(x="Data", y=ifelse(input$ds_y=="counts","count","proportion")) +
+      theme_minimal(13)
+    p
+  })
+  output$ds_box <- renderPlot({
+    x <- ds_vals(); if (length(x)==0) return(NULL)
+    df <- data.frame(val=x)
+    coef_val <- ifelse(input$ds_box_type=="modified", 1.5, Inf)
+    g <- ggplot(df, aes(x=val, y="")) + geom_boxplot(coef=coef_val, width=.25, outlier.alpha=.7) +
+      labs(x=NULL, y=NULL) + theme_minimal(13) + theme(axis.text.y=element_blank())
+    if (isTRUE(input$ds_show_fences)) {
+      q1 <- quantile(x, .25, na.rm=TRUE); q3 <- quantile(x, .75, na.rm=TRUE)
+      iqr <- q3 - q1; lf <- q1 - 1.5*iqr; uf <- q3 + 1.5*iqr
+      g <- g + geom_vline(xintercept=c(lf,uf), linetype=2)
+    }
+    g
+  })
+  output$ds_summary1 <- renderTable({
+    x <- ds_vals(); if (length(x)==0) return(NULL)
+    tibble(
+      `Sample size (n)`=length(x),
+      `Mean (x̄)`=mean(x), `Standard deviation (s)`=sd(x),
+      `Range`=diff(range(x)),
+      `Interquartile Range (IQR)`=IQR(x),
+      `Minimum`=min(x), `First quartile (Q1)`=quantile(x,.25),
+      `Median`=median(x), `Third quartile (Q3)`=quantile(x,.75),
+      `Maximum`=max(x)
+    ) %>% tidyr::pivot_longer(everything(), names_to="Statistic", values_to="Value")
+  }, digits=3, striped=TRUE, bordered=TRUE)
+  output$ds_sorted <- renderText({
+    x <- ds_vals(); if (length(x)==0) return("")
+    paste(sort(x), collapse=", ")
+  }) 
+  
+  
+  ## ---------- Two-sample t helpers ----------
+  ts_n_val <- reactive({
+    if (input$ts_nmode == "slider") as.integer(input$ts_n) else as.integer(input$ts_n_text)
+  })
+  
+  ts_parts <- reactive({
+    n  <- ts_n_val()
+    x1 <- input$ts_x1; x2 <- input$ts_x2
+    s  <- input$ts_s
+    se <- sqrt(s^2/n + s^2/n)
+    t  <- (x1 - x2) / se
+    df <- max(1, min(n-1, n-1))  # "easy approx" shown in UI
+    list(n=n, x1=x1, x2=x2, s=s, diff=x1-x2, se=se, t=t, df=df)
+  })
+  
+  output$ts_t_value_plot <- renderUI({
+    parts <- ts_parts()
+    # mini "dot on number line" for t
+    tmp <- ggplot(data.frame(x = parts$t, y = 0), aes(x, y)) +
+      geom_segment(x=-10, xend=10, y=0, yend=0, linewidth=.6) +
+      geom_point(color="#2C7FB8", size=3) +
+      scale_x_continuous(limits=c(-10,10), breaks=seq(-10,10,5)) +
+      labs(x=NULL, y=NULL) + theme_minimal(12) +
+      theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())
+    tagList(
+      h5(sprintf("Value of test statistic:  t = %.2f", parts$t)),
+      renderPlot({ tmp }, height = 120)
+    )
+  })
+  
+  output$ts_p_plot <- renderPlot({
+    parts <- ts_parts()
+    xs <- seq(-5, 5, length.out = 1201)
+    dens <- dt(xs, df = parts$df)
+    alt <- input$ts_alt
+    shade <- switch(alt,
+                    "gt" = xs >= parts$t,
+                    "lt" = xs <= parts$t,
+                    "ne" = (xs <= -abs(parts$t)) | (xs >=  abs(parts$t))
+    )
+    ggplot() +
+      geom_line(aes(xs, dens)) +
+      geom_area(data = data.frame(xs, dens, shade)[shade, ],
+                aes(xs, dens), fill = "grey50", alpha = .6) +
+      geom_vline(xintercept = parts$t) +
+      labs(x = "test statistic t", y = NULL) +
+      theme_minimal(13) +
+      theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())
+  })
+  
+  output$ts_pval_text <- renderText({
+    p <- ts_parts(); alt <- input$ts_alt
+    pv <- switch(alt,
+                 "gt" = 1 - pt(p$t, df = p$df),
+                 "lt" = pt(p$t, df = p$df),
+                 "ne" = 2 * (1 - pt(abs(p$t), df = p$df))
+    )
+    sprintf("P-value = %.4f", pv)
+  })
+  
+  observe({
+    updateTextInput(session, "ts_df_disp", value = as.character(ts_parts()$df))
+  })
+  
+  ## CI tab
+  output$ts_ci_title <- renderText({
+    parts <- ts_parts(); cl <- input$ts_ci_cl/100
+    tstar <- qt(1 - (1 - cl)/2, df = parts$df)
+    L <- parts$diff - tstar * parts$se
+    U <- parts$diff + tstar * parts$se
+    sprintf("%d%% Confidence interval for (μ1 − μ2):  (%.2f, %.2f)", round(cl*100), L, U)
+  })
+  
+  output$ts_ci_plot <- renderPlot({
+    parts <- ts_parts(); cl <- input$ts_ci_cl/100
+    tstar <- qt(1 - (1 - cl)/2, df = parts$df)
+    L <- parts$diff - tstar * parts$se
+    U <- parts$diff + tstar * parts$se
+    df <- tibble(y=0, x=parts$diff, xmin=L, xmax=U)
+    ggplot(df, aes(x=x, y=y)) +
+      geom_errorbarh(aes(xmin=xmin, xmax=xmax), height=.2, size=1) +
+      geom_point(size=3, color="blue") +
+      coord_cartesian(xlim=c(min(L,U)-2, max(L,U)+2), ylim=c(-1,1)) +
+      labs(x="μ1 − μ2", y=NULL) +
+      theme_minimal(12) +
+      theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())
+  }) 
+  
+  
+  
+  ## ---------- Power simulator (two-sample t) ----------
+  pw_state <- reactiveValues(
+    total = 0L, correct = 0L, type2 = 0L, last=NULL, last_decision=NULL, last_correct=NULL
+  )
+  
+  pw_draw <- function(B = 1, mu1, mu2, alpha){
+    n <- 30L; sd <- 3
+    for (b in seq_len(B)) {
+      x1 <- rnorm(n, mu1, sd)
+      x2 <- rnorm(n, mu2, sd)
+      tt <- t.test(x1, x2, var.equal = FALSE, alternative = "two.sided")
+      reject <- (tt$p.value < alpha)
+      truth_H0 <- (input$pw_truth == "H0")
+      correct <- if (truth_H0) !reject else reject
+      type2   <- (!reject) && (!truth_H0)
+      
+      pw_state$total   <- pw_state$total + 1L
+      pw_state$correct <- pw_state$correct + as.integer(correct)
+      pw_state$type2   <- pw_state$type2   + as.integer(type2)
+      
+      # stash last sample info
+      pw_state$last <- list(
+        x1 = x1, x2 = x2,
+        m1 = mean(x1), s1 = sd(x1),
+        m2 = mean(x2), s2 = sd(x2),
+        t = as.numeric(tt$statistic), p = tt$p.value,
+        reject = reject
+      )
+      pw_state$last_decision <- if (reject) "Reject H0" else "Fail to reject H0"
+      pw_state$last_correct  <- if (correct) "Correct decision" else if (truth_H0) "Type I error" else "Type II error"
+    }
+  }
+  
+  observeEvent(input$pw_draw1, {
+    pw_draw(1, input$pw_mu1, input$pw_mu2, input$pw_alpha)
+  })
+  observeEvent(input$pw_draw50, {
+    pw_draw(50, input$pw_mu1, input$pw_mu2, input$pw_alpha)
+  })
+  
+  output$pw_curr_dec   <- renderText({ pw_state$last_decision %||% "" })
+  output$pw_curr_right <- renderText({ pw_state$last_correct  %||% "" })
+  
+  output$pw_tally <- renderUI({
+    if (pw_state$total == 0L) return(HTML("<em>No simulations yet.</em>"))
+    power  <- pw_state$correct / pw_state$total
+    type2p <- pw_state$type2   / pw_state$total
+    HTML(sprintf(
+      "<b>Proportion of correct decisions (power)</b><br/>%d / %d = %.3f<br/><br/>
+     <b>Proportion of Type 2 Errors</b><br/>%d / %d = %.3f",
+      pw_state$correct, pw_state$total, power,
+      pw_state$type2,   pw_state$total, type2p
+    ))
+  })
+  
+  output$pw_lastplot <- renderPlot({
+    L <- pw_state$last; if (is.null(L)) return(NULL)
+    df <- rbind(
+      data.frame(group = "1", y = L$x1),
+      data.frame(group = "2", y = L$x2)
+    )
+    ggplot(df, aes(group, y)) +
+      geom_boxplot(width=.5, outlier.alpha=.4) +
+      geom_jitter(width=.15, alpha=.6) +
+      labs(x = "Samples", y = NULL) +
+      theme_minimal(13)
+  })
+  
+  output$pw_laststats <- renderUI({
+    L <- pw_state$last; if (is.null(L)) return(HTML("<em>—</em>"))
+    HTML(sprintf("
+    <b>Sample 1</b><br/>mean x̄1 = %.2f<br/>sd s1 = %.2f<br/><br/>
+    <b>Sample 2</b><br/>mean x̄2 = %.2f<br/>sd s2 = %.2f<br/><br/>
+    <b>Hypothesis test</b><br/>t = %.2f<br/>p-value* = %.4f<br/>Decision: %s<br/><br/>
+    <span style='font-size:85%%'>*Two-tailed; Welch df</span>",
+                 L$m1, L$s1, L$m2, L$s2, L$t, L$p, pw_state$last_decision
+    ))
+  })
+  
+  
+  
+  # ----- TAB 7 (NEW): wire the module server -----
+  normalCalcServer("normfb")
+  
+  ciMeanServer("ci_mu") 
+  
+  tTestServer("tt_mu") 
+  
+  chisqServer("chi2") 
+  
+  slopeServer("slope1") 
+  
+  lsGameServer("lsgame") 
+  
+  
+}
+
+shinyApp(ui, server)
